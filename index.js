@@ -40,6 +40,11 @@ app.use('/announcements', require('./routes/announcements'));
 // getUserContext/MANAGER_ROLES gating).
 app.use('/resources', require('./routes/resources'));
 
+// Mounted at /class-portfolio, NOT /school-admin — readable by
+// parents/students/teachers, not just admin-scoped users (see
+// routes/classPortfolio.js for its own classAccess-based gating).
+app.use('/class-portfolio', require('./routes/classPortfolio'));
+
 const PORT = process.env.PORT || 3018;
 if (require.main === module) {
   app.listen(PORT, () => {
