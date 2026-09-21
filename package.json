@@ -1,0 +1,27 @@
+{
+  "name": "aivorah-school-admin-service",
+  "version": "1.0.0",
+  "description": "Aivorah School Admin — standalone microservice for School Admin console endpoints, starting with Grades & Sections, extracted from the ai-mentor monolith's routes/school-admin.js",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.100.0",
+    "cloudinary": "^2.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "groq-sdk": "^1.6.0",
+    "multer": "^2.4.0",
+    "nodemailer": "^10.0.10",
+    "resend": "^6.28.1"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.14",
+    "supertest": "^6.3.4"
+  }
+}
