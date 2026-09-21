@@ -35,6 +35,11 @@ app.use('/school-admin', require('./routes/workspaceSettings'));
 // the file itself (see routes/announcements.js).
 app.use('/announcements', require('./routes/announcements'));
 
+// Mounted at /resources, NOT /school-admin — readable by parents/teachers,
+// not just admin-scoped users (see routes/resources.js for its own
+// getUserContext/MANAGER_ROLES gating).
+app.use('/resources', require('./routes/resources'));
+
 const PORT = process.env.PORT || 3018;
 if (require.main === module) {
   app.listen(PORT, () => {
