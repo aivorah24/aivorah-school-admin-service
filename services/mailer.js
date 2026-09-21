@@ -125,6 +125,75 @@ async function sendOwnAccountCredentialsEmail({ to, name, loginId, password, rol
   }
 }
 
+// Ported from ai-mentor/server/services/mailer.js — sent when a school admin
+// creates a student account (single Add Student or bulk import).
+async function sendCredentialsEmail({ to, childName, loginId, password, childEmail }) {
+  if (!to) return;
+  try {
+    const passwordRow = password
+      ? `<tr><td style="padding:8px 0;color:#888;font-size:13px">Password</td><td style="padding:8px 0;font-family:monospace;font-size:14px;color:#1a1a1a">${password}</td></tr>`
+      : '';
+
+    // Only offer a "forward to child" button when this copy is going to someone
+    // other than the child (i.e. the parent/teacher), and there's a password to forward.
+    const canForward = password && childEmail && childEmail.toLowerCase() !== String(to).toLowerCase();
+    const forwardBlock = canForward ? (() => {
+      const shareText = `Hi ${childName},\n\nHere are your Aivorah login details:\n\nLogin ID: ${loginId}\nPassword: ${password}\n\nLog in at https://aivorah.ai`;
+      const mailtoBody = encodeURIComponent(shareText);
+      const mailtoHref = `mailto:${encodeURIComponent(childEmail)}?subject=${encodeURIComponent('Your Aivorah Login')}&body=${mailtoBody}`;
+      const waHref = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+      return `
+          <div style="text-align:center;margin:4px 0 20px">
+            <a href="${mailtoHref}" style="display:inline-block;background:#7C3AED;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;margin:0 6px 8px">
+              Forward via Email
+            </a>
+            <a href="${waHref}" style="display:inline-block;background:#25D366;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;margin:0 6px 8px">
+              Share via WhatsApp
+            </a>
+            <p style="font-size:12px;color:#999;margin:8px 0 0">Opens your mail app or WhatsApp with the Login ID and Password pre-filled.</p>
+          </div>`;
+    })() : '';
+
+    await sendEmail({
+      to,
+      subject: `${childName}'s Aivorah Login Details`,
+      html: `
+        <div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#fff">
+          <div style="background:#7C3AED;border-radius:12px;padding:24px 24px 16px;margin-bottom:24px">
+            <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700">Aivorah</h1>
+            <p style="margin:8px 0 0;color:#e9d5ff;font-size:14px">Student account ready</p>
+          </div>
+
+          <p style="font-size:15px;color:#333;margin-bottom:4px">Hi there!</p>
+          <p style="font-size:14px;color:#555;line-height:1.6">
+            The student account for <strong>${childName}</strong> has been created on Aivorah.
+            Here are the login credentials — please save them somewhere safe.
+          </p>
+
+          <div style="background:#f5f3ff;border-radius:10px;padding:20px;margin:20px 0;border:1px solid #ddd6fe">
+            <table style="width:100%;border-collapse:collapse">
+              <tr><td style="padding:8px 0;color:#888;font-size:13px">Login ID</td><td style="padding:8px 0;font-family:monospace;font-size:14px;color:#1a1a1a">${loginId}</td></tr>
+              ${passwordRow}
+            </table>
+          </div>
+${forwardBlock}
+          <p style="font-size:13px;color:#666;line-height:1.6">
+            Your child can log in at <a href="https://aivorah.ai" style="color:#7C3AED">aivorah.ai</a>
+            using the <strong>Login ID</strong> and <strong>Password</strong> above.
+            Select <em>Student</em> on the login screen.
+          </p>
+
+          <p style="font-size:12px;color:#aaa;margin-top:32px;border-top:1px solid #eee;padding-top:16px">
+            This email was sent because a student account was created via Aivorah. If you didn't request this, please contact support.
+          </p>
+        </div>
+      `,
+    });
+  } catch (err) {
+    console.warn('[mailer] sendCredentialsEmail failed:', err.message);
+  }
+}
+
 // Ported from ai-mentor/server/services/mailer.js — sent when an access
 // request (B2C -> B2B conversion) is approved.
 async function sendB2BConversionWelcomeEmail({ to, name, role, schoolName, studentName, grade, section }) {
@@ -191,4 +260,4 @@ async function sendB2BConversionWelcomeEmail({ to, name, role, schoolName, stude
   });
 }
 
-module.exports = { sendEmail, sendOwnAccountCredentialsEmail, sendB2BConversionWelcomeEmail };
+module.exports = { sendEmail, sendOwnAccountCredentialsEmail, sendB2BConversionWelcomeEmail, sendCredentialsEmail };

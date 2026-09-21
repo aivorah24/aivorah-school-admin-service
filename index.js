@@ -22,6 +22,7 @@ app.use('/school-admin', requireAdminScope);
 // (/school-admin/grades-sections, /school-admin/grades, /school-admin/classes,
 // ...) the frontend already calls — no contract change for either migrated
 // feature.
+app.use('/school-admin', require('./routes/students'));
 app.use('/school-admin', require('./routes/gradesSections'));
 app.use('/school-admin', require('./routes/classes'));
 app.use('/school-admin', require('./routes/teachers'));
