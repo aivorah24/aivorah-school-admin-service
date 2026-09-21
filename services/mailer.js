@@ -125,4 +125,70 @@ async function sendOwnAccountCredentialsEmail({ to, name, loginId, password, rol
   }
 }
 
-module.exports = { sendEmail, sendOwnAccountCredentialsEmail };
+// Ported from ai-mentor/server/services/mailer.js — sent when an access
+// request (B2C -> B2B conversion) is approved.
+async function sendB2BConversionWelcomeEmail({ to, name, role, schoolName, studentName, grade, section }) {
+  if (!to) return;
+  const safe = (s) => String(s || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const isParent = role === 'parent';
+  const targetName = safe(name || (isParent ? 'Parent' : 'Student'));
+  const school = safe(schoolName || 'Your School');
+  const child = safe(studentName || 'your child');
+  const classInfo = [grade, section].filter(Boolean).join(' - ');
+
+  const subject = isParent
+    ? `Welcome to ${school} on Aivorah — Parent Portal Activated`
+    : `Welcome to ${school} on Aivorah — Student Portal Activated`;
+
+  const leadText = isParent
+    ? `We are pleased to inform you that ${child ? `<strong>${child}</strong>'s` : 'your child\'s'} profile has been officially verified and linked to <strong>${school}</strong>${classInfo ? ` (${classInfo})` : ''} on the Aivorah digital ecosystem.`
+    : `We are pleased to inform you that your student account has been officially verified and linked to <strong>${school}</strong>${classInfo ? ` (${classInfo})` : ''} on the Aivorah digital ecosystem.`;
+
+  const capabilitiesList = isParent
+    ? `
+      <ul style="padding-left:20px;color:#444;font-size:14px;line-height:1.8;margin:12px 0">
+        <li><strong>Real-Time Attendance & Schedule Tracking:</strong> Monitor daily class timetables and live attendance status.</li>
+        <li><strong>Teacher Feedback & Gradebook Insights:</strong> Review assignments, quizzes, and personalized academic evaluations.</li>
+        <li><strong>Official School Communication:</strong> Receive verified announcements, circulars, and direct teacher correspondence.</li>
+        <li><strong>Curriculum-Aligned AI Oversight:</strong> Review your child's learning progression across structured grade milestones.</li>
+      </ul>`
+    : `
+      <ul style="padding-left:20px;color:#444;font-size:14px;line-height:1.8;margin:12px 0">
+        <li><strong>Official School Timetable:</strong> Access your live daily schedule, homeroom periods, and class meeting links.</li>
+        <li><strong>Teacher-Assigned Challenges & Worksheets:</strong> Complete grade-scoped assignments directly within your portal.</li>
+        <li><strong>Class Leaderboard & Analytics:</strong> Track your academic standing and topic mastery alongside your peers.</li>
+        <li><strong>Curriculum-Aligned AI Study Companion:</strong> Get 24/7 personalized tutoring synced to your exact school syllabus.</li>
+      </ul>`;
+
+  return sendEmail({
+    to,
+    subject,
+    html: `
+      <div style="font-family:sans-serif;max-width:580px;margin:0 auto;padding:28px;background:#fff;border:1px solid #eaeaea;border-radius:12px">
+        <div style="background:#1E293B;border-radius:10px;padding:24px;margin-bottom:24px">
+          <h1 style="margin:0;color:#fff;font-size:22px;font-weight:700">Aivorah</h1>
+          <p style="margin:6px 0 0;color:#94A3B8;font-size:13px">Official School Network Connection · ${school}</p>
+        </div>
+        <p style="font-size:15px;color:#1E293B;margin-bottom:12px">Dear ${targetName},</p>
+        <p style="font-size:14px;color:#475569;line-height:1.6;margin-top:0">${leadText}</p>
+
+        <div style="background:#F8FAFC;border-left:4px solid #3B82F6;padding:16px 20px;border-radius:0 8px 8px 0;margin:20px 0">
+          <h3 style="margin:0 0 8px;font-size:14px;color:#1E293B;text-transform:uppercase;letter-spacing:0.5px">Your New B2B Capabilities</h3>
+          ${capabilitiesList}
+        </div>
+
+        <p style="font-size:14px;color:#475569;line-height:1.6">
+          You may log in at any time to explore your connected dashboard. All existing study history has been seamlessly preserved.
+        </p>
+        <div style="text-align:center;margin:28px 0">
+          <a href="https://aivorah.ai" style="display:inline-block;background:#3B82F6;color:#fff;text-decoration:none;padding:12px 32px;border-radius:8px;font-size:14px;font-weight:600">Access School Portal</a>
+        </div>
+        <p style="font-size:12px;color:#94A3B8;margin-top:32px;border-top:1px solid #F1F5F9;padding-top:16px">
+          ${school} · Powered by Aivorah Digital Learning Infrastructure
+        </p>
+      </div>
+    `,
+  });
+}
+
+module.exports = { sendEmail, sendOwnAccountCredentialsEmail, sendB2BConversionWelcomeEmail };

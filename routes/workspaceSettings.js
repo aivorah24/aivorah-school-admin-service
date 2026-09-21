@@ -14,22 +14,6 @@ function shapeSchool(row) {
   return { id: row.id, name: row.name, academicYear: row.academic_year || '', contactEmail: row.contact_email || '' };
 }
 
-// GET /school-admin/overview — school identity fields for Workspace Settings.
-router.get('/overview', async (req, res) => {
-  const schoolId = effectiveSchoolId(req);
-  if (!schoolId) return res.status(400).json({ error: 'schoolId required for platform admins' });
-  try {
-    const { data, error } = await supabase
-      .from('schools').select('id, name, academic_year, contact_email').eq('id', schoolId).maybeSingle();
-    if (error) throw error;
-    if (!data) return res.status(404).json({ error: 'School not found' });
-    res.json({ school: shapeSchool(data) });
-  } catch (err) {
-    console.error('[GET /school-admin/overview] error:', err.message);
-    res.status(500).json({ error: 'Failed to load workspace overview' });
-  }
-});
-
 // PATCH /school-admin/workspace-settings — update school name/academic year/contact email.
 router.patch('/workspace-settings', async (req, res) => {
   const schoolId = effectiveSchoolId(req);
