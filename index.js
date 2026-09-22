@@ -30,6 +30,7 @@ app.use('/school-admin', require('./routes/parents'));
 app.use('/school-admin', require('./routes/importHistory'));
 app.use('/school-admin', require('./routes/workspaceSettings'));
 app.use('/school-admin', require('./routes/dashboard'));
+app.use('/school-admin', require('./routes/people'));
 
 // Mounted at /announcements, NOT /school-admin — most of its routes (active,
 // list, :id, seen, dismiss) are reader-facing and unauthenticated by design;
