@@ -36,6 +36,12 @@ function resolveCurriculum(baseCurriculum, grade) {
   return 'IB DP';
 }
 
+// Only IB derives its curriculum from grade (PYP/MYP/DP); other boards keep the student's own value.
+async function derivedCurriculumForGrade(schoolId, grade) {
+  const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
+  return school?.curriculum === 'IB' ? resolveCurriculum('IB', grade) : null;
+}
+
 // GET /school-admin/students?adminEmail=&search=&grade=&section=&curriculum=&status=&sort=name|grade&dir=asc|desc&page=&limit=
 router.get('/students', async (req, res) => {
   const schoolId = effectiveSchoolId(req);
@@ -454,6 +460,10 @@ router.patch('/students/:id', async (req, res) => {
     if (grade !== undefined) patch.grade = String(grade).trim() || null;
     if (section !== undefined) patch.section = String(section).trim() || null;
     if (curriculum !== undefined) patch.curriculum = String(curriculum).trim() || null;
+    else if (patch.grade) {
+      const derived = await derivedCurriculumForGrade(schoolId, patch.grade);
+      if (derived) patch.curriculum = derived;
+    }
     if (admissionNumber !== undefined) {
       const adm = String(admissionNumber).trim();
       if (adm) {
@@ -579,6 +589,8 @@ router.post('/students/bulk-grade', async (req, res) => {
     const { owned, skipped } = await assertOwnedStudents(studentIds, req.adminScope.schoolId);
     if (owned.length) {
       const patch = { grade: targetGrade };
+      const derived = await derivedCurriculumForGrade(req.adminScope.schoolId, targetGrade);
+      if (derived) patch.curriculum = derived;
       if (section !== undefined) patch.section = String(section || '').trim() || null;
       const { error } = await supabase.from('users').update(patch).in('id', owned);
       if (error) throw error;
