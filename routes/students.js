@@ -36,10 +36,12 @@ function resolveCurriculum(baseCurriculum, grade) {
   return 'IB DP';
 }
 
-// Only IB derives its curriculum from grade (PYP/MYP/DP); other boards keep the student's own value.
-async function derivedCurriculumForGrade(schoolId, grade) {
-  const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
-  return school?.curriculum === 'IB' ? resolveCurriculum('IB', grade) : null;
+// Only IB derives its curriculum from grade (PYP/MYP/DP). A student counts as IB when the
+// school is IB or their own curriculum is IB (mixed-curriculum schools); others keep theirs.
+function derivedCurriculum(schoolBase, studentCurriculum, grade) {
+  if (!/\d/.test(String(grade || ''))) return null;
+  const isIB = schoolBase === 'IB' || /^IB/i.test(String(studentCurriculum || ''));
+  return isIB ? resolveCurriculum('IB', grade) : null;
 }
 
 // GET /school-admin/students?adminEmail=&search=&grade=&section=&curriculum=&status=&sort=name|grade&dir=asc|desc&page=&limit=
@@ -419,10 +421,11 @@ router.post('/students', async (req, res) => {
 });
 
 async function assertOwnedStudents(ids, schoolId) {
-  const { data, error } = await supabase.from('users').select('id').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
+  const { data, error } = await supabase.from('users').select('id, curriculum').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
   if (error) throw error;
-  const owned = new Set((data || []).map((r) => r.id));
-  return { owned: ids.filter((id) => owned.has(id)), skipped: ids.filter((id) => !owned.has(id)) };
+  const rows = data || [];
+  const owned = new Set(rows.map((r) => r.id));
+  return { owned: ids.filter((id) => owned.has(id)), skipped: ids.filter((id) => !owned.has(id)), rows };
 }
 
 // PATCH /school-admin/students/:id/status  { adminEmail, status: 'active'|'inactive'|'archived' }
@@ -448,7 +451,7 @@ router.patch('/students/:id', async (req, res) => {
   const schoolId = req.adminScope.schoolId;
   const { name, grade, section, admissionNumber, curriculum, parentName, parentPhone } = req.body || {};
   try {
-    const { owned } = await assertOwnedStudents([req.params.id], schoolId);
+    const { owned, rows } = await assertOwnedStudents([req.params.id], schoolId);
     if (!owned.length) return res.status(403).json({ error: 'Not authorized to manage this student' });
 
     const patch = {};
@@ -461,7 +464,8 @@ router.patch('/students/:id', async (req, res) => {
     if (section !== undefined) patch.section = String(section).trim() || null;
     if (curriculum !== undefined) patch.curriculum = String(curriculum).trim() || null;
     else if (patch.grade) {
-      const derived = await derivedCurriculumForGrade(schoolId, patch.grade);
+      const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
+      const derived = derivedCurriculum(school?.curriculum, rows[0]?.curriculum, patch.grade);
       if (derived) patch.curriculum = derived;
     }
     if (admissionNumber !== undefined) {
@@ -586,14 +590,21 @@ router.post('/students/bulk-grade', async (req, res) => {
   const targetGrade = String(grade || '').trim();
   if (!targetGrade) return res.status(400).json({ error: 'Target grade required' });
   try {
-    const { owned, skipped } = await assertOwnedStudents(studentIds, req.adminScope.schoolId);
+    const { owned, skipped, rows } = await assertOwnedStudents(studentIds, req.adminScope.schoolId);
     if (owned.length) {
-      const patch = { grade: targetGrade };
-      const derived = await derivedCurriculumForGrade(req.adminScope.schoolId, targetGrade);
-      if (derived) patch.curriculum = derived;
-      if (section !== undefined) patch.section = String(section || '').trim() || null;
-      const { error } = await supabase.from('users').update(patch).in('id', owned);
-      if (error) throw error;
+      const base = { grade: targetGrade };
+      if (section !== undefined) base.section = String(section || '').trim() || null;
+      const { data: school } = await supabase.from('schools').select('curriculum').eq('id', req.adminScope.schoolId).maybeSingle();
+      const groups = new Map();
+      for (const r of rows) {
+        const c = derivedCurriculum(school?.curriculum, r.curriculum, targetGrade);
+        if (!groups.has(c)) groups.set(c, []);
+        groups.get(c).push(r.id);
+      }
+      for (const [c, ids] of groups) {
+        const { error } = await supabase.from('users').update(c ? { ...base, curriculum: c } : base).in('id', ids);
+        if (error) throw error;
+      }
     }
     res.json({ promoted: owned.length, skipped, grade: targetGrade, section: section !== undefined ? (String(section || '').trim() || null) : undefined });
   } catch (err) {
