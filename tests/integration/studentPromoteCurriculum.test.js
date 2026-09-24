@@ -63,3 +63,39 @@ describe('PATCH /school-admin/students/:id', () => {
     expect(usersUpdatePatches()[0]).toEqual({ grade: 'Grade 6', curriculum: 'IB MYP' });
   });
 });
+
+describe('every grade maps to the right IB stage', () => {
+  const expected = (n) => (n <= 5 ? 'IB PYP' : n <= 10 ? 'IB MYP' : 'IB DP');
+  test.each(Array.from({ length: 12 }, (_, i) => i + 1))('promote to Grade %i', async (n) => {
+    const res = await promote(null, `Grade ${n}`, 'IB PYP');
+    expect(res.status).toBe(200);
+    expect(usersUpdatePatches()[0]).toEqual({ grade: `Grade ${n}`, curriculum: expected(n) });
+  });
+});
+
+describe('mixed batch promoted together', () => {
+  test('IB students get a new stage, non-IB students keep theirs, section applies to all', async () => {
+    mockSb.setTable('users', [
+      { data: ADMIN, error: null },
+      { data: [{ id: 'a', curriculum: 'IB PYP' }, { id: 'b', curriculum: 'CBSE' }, { id: 'c', curriculum: 'IB PYP' }], error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.setTable('schools', { data: { curriculum: null }, error: null });
+    const res = await request(app).post('/school-admin/students/bulk-grade?adminEmail=admin@school.test')
+      .send({ studentIds: ['a', 'b', 'c'], grade: 'Grade 6', section: 'B' });
+    expect(res.status).toBe(200);
+    const patches = usersUpdatePatches();
+    expect(patches).toContainEqual({ grade: 'Grade 6', section: 'B', curriculum: 'IB MYP' });
+    expect(patches).toContainEqual({ grade: 'Grade 6', section: 'B' });
+    expect(patches).toHaveLength(2);
+  });
+
+  test('students outside the school are skipped and never updated', async () => {
+    mockSb.setTable('users', [{ data: ADMIN, error: null }, { data: [{ id: 'a', curriculum: 'IB PYP' }], error: null }, { data: null, error: null }]);
+    mockSb.setTable('schools', { data: { curriculum: null }, error: null });
+    const res = await request(app).post('/school-admin/students/bulk-grade?adminEmail=admin@school.test')
+      .send({ studentIds: ['a', 'other-school'], grade: 'Grade 6' });
+    expect(res.body.promoted).toBe(1);
+    expect(res.body.skipped).toEqual(['other-school']);
+  });
+});
