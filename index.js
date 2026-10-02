@@ -38,11 +38,6 @@ app.use('/school-admin', require('./routes/people'));
 // the file itself (see routes/announcements.js).
 app.use('/announcements', require('./routes/announcements'));
 
-// Mounted at /resources, NOT /school-admin — readable by parents/teachers,
-// not just admin-scoped users (see routes/resources.js for its own
-// getUserContext/MANAGER_ROLES gating).
-app.use('/resources', require('./routes/resources'));
-
 // Mounted at /class-portfolio, NOT /school-admin — readable by
 // parents/students/teachers, not just admin-scoped users (see
 // routes/classPortfolio.js for its own classAccess-based gating).
