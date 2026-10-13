@@ -10,9 +10,10 @@ const router = express.Router();
 const { randomUUID } = require('crypto');
 const supabase = require('../services/supabase');
 const {
-  generateSecurePassword, generateStudentEmail, generateParentLoginId, createFirebaseAccount,
-  toTitleCase, generateAdmissionNumber,
+  generateSecurePassword, generateStudentEmail, toTitleCase, generateAdmissionNumber,
 } = require('../services/studentAccounts');
+const { generateParentLoginId } = require('../services/parentAccounts');
+const { provisionAccount } = require('../services/accountProvisioning');
 const { sendCredentialsEmail, sendOwnAccountCredentialsEmail } = require('../services/mailer');
 const { sortGradeNames, sortCurriculumNames, buildGradesSectionsView } = require('../services/academicStructure');
 const { deriveStatusMap, displayStatus } = require('../services/userStatus');
@@ -316,11 +317,7 @@ router.post('/students', async (req, res) => {
     const schoolCurriculum = String(curriculumIn || '').trim() || resolveCurriculum(school?.curriculum, grade);
     const name = toTitleCase(`${firstName.trim()} ${lastName.trim()}`);
     const studentEmailProvided = String(emailOverride || '').trim().toLowerCase();
-    const email = studentEmailProvided || generateStudentEmail(name, schoolName);
     const password = generateSecurePassword();
-
-    const { data: dup } = await supabase.from('users').select('id').eq('email', email).maybeSingle();
-    if (dup) return res.status(409).json({ error: 'A user with this email already exists' });
 
     const parentName = String(parentNameIn || '').trim();
     const parentEmailIn = String(parentEmailInRaw || '').trim().toLowerCase();
@@ -340,15 +337,23 @@ router.post('/students', async (req, res) => {
     const { count } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('role', 'student');
     const admissionNumber = admissionNumberTrimmed || generateAdmissionNumber(schoolName, count || 0);
 
-    const firebaseUid = await createFirebaseAccount(email, password);
     const userId = randomUUID();
-    const { error: userErr } = await supabase.from('users').insert({
-      id: userId, name, email, role: 'student',
-      grade, section: section || null, school: schoolName, school_id: schoolId, curriculum: schoolCurriculum,
-      admission_number: admissionNumber, status: 'active', onboarding_complete: true,
-      admin_notes: notes?.trim() || null,
+    const studentAccount = await provisionAccount({
+      email: studentEmailProvided,
+      generate: ({ attempt }) => generateStudentEmail(name, schoolName, attempt),
+      password,
+      conflictMessage: 'This email is already registered.',
+      insertUser: async (loginEmail) => {
+        const { error: userErr } = await supabase.from('users').insert({
+          id: userId, name, email: loginEmail, role: 'student',
+          grade, section: section || null, school: schoolName, school_id: schoolId, curriculum: schoolCurriculum,
+          admission_number: admissionNumber, status: 'active', onboarding_complete: true,
+          admin_notes: notes?.trim() || null,
+        });
+        if (userErr) throw userErr;
+      },
     });
-    if (userErr) throw userErr;
+    const { email, firebaseUid } = studentAccount;
 
     await supabase.from('student_stats').insert({ student_id: userId });
     const mustChangePassword = initialStatus !== 'active';
@@ -372,16 +377,30 @@ router.post('/students', async (req, res) => {
         }
       }
       if (!parentUser) {
-        if (!parentEmail) parentEmail = await generateParentLoginId(supabase);
         const pName = toTitleCase(parentName);
         const pPassword = generateSecurePassword();
-        const pFirebaseUid = await createFirebaseAccount(parentEmail, pPassword);
-        const parentUserId = randomUUID();
-        const { error: pErr } = await supabase.from('users').insert({
-          id: parentUserId, name: pName, email: parentEmail, role: 'parent',
-          school: schoolName, school_id: schoolId, status: 'active', onboarding_complete: true,
-        });
-        if (pErr) throw pErr;
+        let pFirebaseUid;
+        try {
+          ({ email: parentEmail, firebaseUid: pFirebaseUid } = await provisionAccount({
+            email: parentEmail,
+            generate: generateParentLoginId,
+            password: pPassword,
+            conflictMessage: 'This parent email is already registered.',
+            insertUser: async (loginEmail) => {
+              const { error: pErr } = await supabase.from('users').insert({
+                id: randomUUID(), name: pName, email: loginEmail, role: 'parent',
+                school: schoolName, school_id: schoolId, status: 'active', onboarding_complete: true,
+              });
+              if (pErr) throw pErr;
+            },
+          }));
+        } catch (pErr) {
+          // Don't leave a student behind whose Add Student call reported failure.
+          await deleteStudentRows(userId, email);
+          await supabase.from('users').delete().eq('id', userId);
+          await studentAccount.deleteFirebaseAccount();
+          throw pErr;
+        }
         await supabase.from('user_preferences').upsert({
           user_email: parentEmail,
           data: { loginId: parentEmail, initialPassword: pPassword, parentName: pName, school: schoolName, firebaseUid: pFirebaseUid, mustChangePassword: true, accountStatus: 'active' },
@@ -415,6 +434,7 @@ router.post('/students', async (req, res) => {
       parent: newParentCreds ? { name: newParentCreds.name, email: newParentCreds.email, password: newParentCreds.password } : undefined,
     });
   } catch (err) {
+    if (err.code === 'EMAIL_EXISTS') return res.status(409).json({ error: err.message, code: 'EMAIL_EXISTS' });
     console.error('[POST /school-admin/students] error:', err.message);
     res.status(500).json({ error: err.message || 'Failed to create student' });
   }
@@ -714,22 +734,30 @@ router.post('/students/bulk', async (req, res) => {
           skipped.push({ row: i + 1, name, email: student.email, reason: 'Student already exists' });
           continue;
         } else {
-          const email = studentEmail || generateStudentEmail(name, schoolName);
-          const { data: dup } = await supabase.from('users').select('id, school_id').eq('email', email).maybeSingle();
-          if (dup) {
+          const password = generateSecurePassword();
+          const admissionNumber = admissionNo || generateAdmissionNumber(schoolName, studentCount++);
+          studentUserId = randomUUID();
+          let email, firebaseUid;
+          try {
+            ({ email, firebaseUid } = await provisionAccount({
+              email: studentEmail,
+              generate: ({ attempt }) => generateStudentEmail(name, schoolName, attempt),
+              password,
+              conflictMessage: 'Email already exists',
+              insertUser: async (loginEmail) => {
+                const { error: userErr } = await supabase.from('users').insert({
+                  id: studentUserId, name, email: loginEmail, role: 'student',
+                  grade: grade || null, section: section || null, school: schoolName, school_id: schoolId, curriculum: rowCurriculum || resolveCurriculum(schoolBaseCurriculum, grade),
+                  admission_number: admissionNumber, status: 'active', onboarding_complete: true,
+                });
+                if (userErr) throw userErr;
+              },
+            }));
+          } catch (provErr) {
+            if (provErr.code !== 'EMAIL_EXISTS') throw provErr;
             errors.push({ row: i + 1, error: 'Email already exists' });
             continue;
           }
-          const password = generateSecurePassword();
-          const admissionNumber = admissionNo || generateAdmissionNumber(schoolName, studentCount++);
-          const firebaseUid = await createFirebaseAccount(email, password);
-          studentUserId = randomUUID();
-          const { error: userErr } = await supabase.from('users').insert({
-            id: studentUserId, name, email, role: 'student',
-            grade: grade || null, section: section || null, school: schoolName, school_id: schoolId, curriculum: rowCurriculum || resolveCurriculum(schoolBaseCurriculum, grade),
-            admission_number: admissionNumber, status: 'active', onboarding_complete: true,
-          });
-          if (userErr) throw userErr;
           await supabase.from('student_stats').insert({ student_id: studentUserId });
           await supabase.from('user_preferences').upsert({
             user_email: email,
@@ -766,17 +794,23 @@ router.post('/students/bulk', async (req, res) => {
             }
           }
           if (!parentUser) {
-            if (!parentEmail) parentEmail = await generateParentLoginId(supabase);
             const pName = toTitleCase(parentName);
             const pPassword = generateSecurePassword();
-            const pFirebaseUid = await createFirebaseAccount(parentEmail, pPassword);
-            const parentUserId = randomUUID();
-            const { error: pErr } = await supabase.from('users').insert({
-              id: parentUserId, name: pName, email: parentEmail, role: 'parent',
-              phone: parentPhone || null, school: schoolName, school_id: schoolId,
-              status: 'active', onboarding_complete: true,
-            });
-            if (pErr) throw pErr;
+            let pFirebaseUid;
+            ({ email: parentEmail, firebaseUid: pFirebaseUid } = await provisionAccount({
+              email: parentEmail,
+              generate: generateParentLoginId,
+              password: pPassword,
+              conflictMessage: `Parent email ${parentEmail} is already registered`,
+              insertUser: async (loginEmail) => {
+                const { error: pErr } = await supabase.from('users').insert({
+                  id: randomUUID(), name: pName, email: loginEmail, role: 'parent',
+                  phone: parentPhone || null, school: schoolName, school_id: schoolId,
+                  status: 'active', onboarding_complete: true,
+                });
+                if (pErr) throw pErr;
+              },
+            }));
             await supabase.from('user_preferences').upsert({
               user_email: parentEmail,
               data: { loginId: parentEmail, initialPassword: pPassword, parentName: pName, school: schoolName, firebaseUid: pFirebaseUid, mustChangePassword: true, accountStatus: 'active' },

@@ -14,12 +14,15 @@ function generateSecurePassword() {
   return chars.join('');
 }
 
-function generateStudentEmail(name, school) {
+// `attempt` > 0 adds a random nonce — a retry within the same millisecond
+// (bulk import of two same-name students) would otherwise repeat the email.
+function generateStudentEmail(name, school, attempt = 0) {
   const slug = String(name || 'student').trim().toLowerCase()
     .replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, '.').slice(0, 30);
   const schoolSlug = String(school || 'school').trim().toLowerCase()
     .replace(/[^a-z0-9]/g, '').slice(0, 10);
-  return `${slug}.${Date.now()}@${schoolSlug}.student`;
+  const nonce = attempt > 0 ? randomInt(1000, 10000) : '';
+  return `${slug}.${Date.now()}${nonce}@${schoolSlug}.student`;
 }
 
 // Same slug scheme as generateStudentEmail but for staff (teacher/parent)
@@ -32,19 +35,6 @@ function generateStaffEmail(name, school, roleSuffix) {
   const schoolSlug = String(school || 'school').trim().toLowerCase()
     .replace(/[^a-z0-9]/g, '').slice(0, 10);
   return `${slug}.${Date.now()}@${schoolSlug}.${roleSuffix || 'staff'}`;
-}
-
-// Simple, typeable login IDs — p1, p2, p3, ... @aivorah.parent — mirroring the
-// student "s1, s2, ..." scheme. Collision-safe: checks the DB for the next
-// unused number. Requires a supabase client passed in (this module is
-// otherwise DB-free).
-async function generateParentLoginId(supabase) {
-  for (let n = 1; n < 100000; n++) {
-    const candidate = `p${n}@aivorah.parent`;
-    const { data: existing } = await supabase.from('users').select('id').eq('email', candidate).maybeSingle();
-    if (!existing) return candidate;
-  }
-  return `p${Date.now()}@aivorah.parent`;
 }
 
 async function createFirebaseAccount(email, password) {
@@ -75,7 +65,6 @@ module.exports = {
   generateSecurePassword,
   generateStudentEmail,
   generateStaffEmail,
-  generateParentLoginId,
   createFirebaseAccount,
   toTitleCase,
   generateAdmissionNumber,

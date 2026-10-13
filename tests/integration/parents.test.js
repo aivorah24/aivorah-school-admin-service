@@ -4,16 +4,19 @@ jest.mock('../../services/supabase', () => mockSb.supabase);
 
 jest.mock('../../services/teacherAccounts', () => ({
   generateSecurePassword: jest.fn(() => 'Sup3r#Pass'),
-  createFirebaseAccount: jest.fn(() => Promise.resolve('firebase-uid-1')),
   toTitleCase: jest.fn((s) => s.replace(/\b\w/g, (c) => c.toUpperCase())),
 }));
+jest.mock('../../services/firebaseAuth', () => ({
+  signUp: jest.fn(() => Promise.resolve({ uid: 'firebase-uid-1', idToken: 'id-token-1' })),
+  deleteAccount: jest.fn(() => Promise.resolve()),
+}));
 jest.mock('../../services/parentAccounts', () => ({
-  generateParentLoginId: jest.fn(() => Promise.resolve('p7@aivorah.parent')),
+  generateParentLoginId: jest.fn(({ attempt = 0 } = {}) => Promise.resolve(`p${7 + attempt}@aivorah.parent`)),
 }));
 
 const request = require('supertest');
 const app = require('../../index');
-const { createFirebaseAccount } = require('../../services/teacherAccounts');
+const { signUp: createFirebaseAccount, deleteAccount } = require('../../services/firebaseAuth');
 
 const SCHOOL_ADMIN = { id: 'admin-1', role: 'school_admin', school_id: 'school-1' };
 
@@ -147,5 +150,108 @@ describe('POST /school-admin/parents', () => {
     const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test').send({ ...body, children: [{ admissionNumber: 'TSRA-1005' }] });
 
     expect(res.status).toBe(201);
+  });
+
+  test('blank email + admission no: generated login id is created, Firebase gets the generated id (never "")', async () => {
+    mockSb.setTable('schools', { data: { name: 'TSRA' }, error: null });
+    mockSb.setTable('users', [
+      { data: SCHOOL_ADMIN, error: null },
+      { data: [{ id: 'student-1044' }], error: null }, // TSRA-1044
+      { data: null, error: null }, // generated id free in users
+      { data: null, error: null }, // insert
+    ]);
+
+    const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test')
+      .send({ ...body, email: '', children: [{ admissionNumber: 'TSRA-1044' }] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.email).toBe('p7@aivorah.parent');
+    expect(createFirebaseAccount).toHaveBeenCalledTimes(1);
+    expect(createFirebaseAccount).toHaveBeenCalledWith('p7@aivorah.parent', 'Sup3r#Pass');
+  });
+
+  test('generated login id already in Firebase (but not users) → regenerated instead of EMAIL_EXISTS', async () => {
+    mockSb.setTable('schools', { data: { name: 'TSRA' }, error: null });
+    mockSb.setTable('users', [
+      { data: SCHOOL_ADMIN, error: null },
+      { data: null, error: null }, // p7 free in users
+      { data: null, error: null }, // p8 free in users
+      { data: null, error: null }, // insert
+    ]);
+    createFirebaseAccount.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('EMAIL_EXISTS'), { code: 'EMAIL_EXISTS' })));
+
+    const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test').send(body);
+
+    expect(res.status).toBe(201);
+    expect(res.body.email).toBe('p8@aivorah.parent');
+    expect(createFirebaseAccount.mock.calls.map((c) => c[0])).toEqual(['p7@aivorah.parent', 'p8@aivorah.parent']);
+  });
+
+  test('typed email of an existing parent in the school → 409 with the link-instead offer', async () => {
+    mockSb.setTable('schools', { data: { name: 'TSRA' }, error: null });
+    mockSb.setTable('users', [
+      { data: SCHOOL_ADMIN, error: null },
+      { data: { id: 'parent-9', name: 'Asha Rao', email: 'asha@x.test', role: 'parent', school_id: 'school-1' }, error: null },
+    ]);
+
+    const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test').send({ ...body, email: 'Asha@x.test' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'An account with this email already exists. Link this child to the existing parent instead?',
+      code: 'EMAIL_EXISTS',
+      existingParent: { id: 'parent-9', name: 'Asha Rao', email: 'asha@x.test' },
+    });
+    expect(createFirebaseAccount).not.toHaveBeenCalled();
+  });
+
+  test('typed email that only exists in Firebase → 409, no raw EMAIL_EXISTS text', async () => {
+    mockSb.setTable('schools', { data: { name: 'TSRA' }, error: null });
+    mockSb.setTable('users', [{ data: SCHOOL_ADMIN, error: null }, { data: null, error: null }]);
+    createFirebaseAccount.mockImplementationOnce(() => Promise.reject(Object.assign(new Error('EMAIL_EXISTS'), { code: 'EMAIL_EXISTS' })));
+
+    const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test').send({ ...body, email: 'ghost@x.test' });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'An account with this email already exists.', code: 'EMAIL_EXISTS' });
+  });
+
+  test('users insert fails after Firebase signup → Firebase account is deleted', async () => {
+    mockSb.setTable('schools', { data: { name: 'TSRA' }, error: null });
+    mockSb.setTable('users', [
+      { data: SCHOOL_ADMIN, error: null },
+      { data: null, error: null }, // generated id free
+      { data: null, error: { message: 'insert failed' } },
+    ]);
+
+    const res = await request(app).post('/school-admin/parents?adminEmail=admin@school.test').send(body);
+
+    expect(res.status).toBe(500);
+    expect(deleteAccount).toHaveBeenCalledWith('id-token-1');
+    expect(mockSb.supabase.from).not.toHaveBeenCalledWith('parent_children');
+  });
+});
+
+describe('POST /school-admin/parents/:id/children', () => {
+  test('links the resolved child to the existing parent, skipping links that already exist', async () => {
+    mockSb.setTable('users', [
+      { data: SCHOOL_ADMIN, error: null },
+      { data: { id: 'parent-9', name: 'Asha Rao', email: 'asha@x.test' }, error: null },
+      { data: [{ id: 'student-1044' }], error: null },
+    ]);
+    mockSb.setTable('parent_children', [{ data: [], error: null }, { data: null, error: null }]);
+
+    const res = await request(app).post('/school-admin/parents/parent-9/children?adminEmail=admin@school.test')
+      .send({ children: [{ admissionNumber: 'TSRA-1044' }] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ id: 'parent-9', name: 'Asha Rao', email: 'asha@x.test', linked: 1 });
+  });
+
+  test('404 for a parent outside the school', async () => {
+    mockSb.setTable('users', [{ data: SCHOOL_ADMIN, error: null }, { data: null, error: null }]);
+    const res = await request(app).post('/school-admin/parents/nope/children?adminEmail=admin@school.test')
+      .send({ children: [{ admissionNumber: 'TSRA-1044' }] });
+    expect(res.status).toBe(404);
   });
 });
