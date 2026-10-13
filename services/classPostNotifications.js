@@ -34,14 +34,15 @@ async function optedOutEmails(emails) {
 async function notifyClassPost(post) {
   try {
     if (!post?.id || post.status !== 'published') return { ok: false, skipped: 'not_published' };
-    const { data: students, error } = await supabase
+    const { data: rows, error } = await supabase
       .from('users')
-      .select('id, email')
+      .select('id, email, section')
       .eq('school_id', post.school_id)
       .eq('grade', post.grade)
-      .eq('section', post.section || '')
       .eq('role', 'student');
     if (error) throw error;
+    // Section filtered here so a null section matches a post with no section.
+    const students = (rows || []).filter((s) => (s.section || '') === (post.section || ''));
     if (!students?.length) return { ok: true, skipped: 'no_students' };
 
     const studentIds = students.map((s) => s.id);

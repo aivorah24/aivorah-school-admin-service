@@ -8,7 +8,7 @@ const POST = {
   id: 'post-1', school_id: 'school-1', grade: 'Grade 5', section: 'A', status: 'published',
   caption: 'Science   fair photos', created_by: 'teacher@school.test', created_at: '2026-10-13T09:00:00.000Z',
 };
-const STUDENTS = [{ id: 's1', email: 'asha@school.test' }, { id: 's2', email: 'ravi@school.test' }];
+const STUDENTS = [{ id: 's1', email: 'asha@school.test', section: 'A' }, { id: 's2', email: 'ravi@school.test', section: 'A' }];
 
 beforeEach(() => {
   mockSb.reset();
@@ -32,7 +32,6 @@ describe('notifyClassPost', () => {
     const users = usersChain();
     expect(users.eq).toHaveBeenCalledWith('school_id', 'school-1');
     expect(users.eq).toHaveBeenCalledWith('grade', 'Grade 5');
-    expect(users.eq).toHaveBeenCalledWith('section', 'A');
     expect(users.eq).toHaveBeenCalledWith('role', 'student');
     const [fn, { p_event }] = mockSb.supabase.rpc.mock.calls[0];
     expect(fn).toBe('notify_event');
@@ -59,6 +58,18 @@ describe('notifyClassPost', () => {
     await notifyClassPost(POST);
 
     expect(mockSb.supabase.rpc.mock.calls[0][1].p_event.exclude_emails.sort()).toEqual(['mom@home.test', 'ravi@school.test']);
+  });
+
+  test('section is matched in code: other sections skipped, a null section matches a post with none', async () => {
+    mockSb.setTable('users', { data: [...STUDENTS, { id: 's3', email: 'b@school.test', section: 'B' }], error: null });
+    mockSb.setRpc({ data: { inserted: [] }, error: null });
+    await notifyClassPost(POST);
+    expect(mockSb.supabase.rpc.mock.calls[0][1].p_event.student_ids).toEqual(['s1', 's2']);
+
+    mockSb.supabase.rpc.mockClear();
+    mockSb.setTable('users', { data: [{ id: 's4', email: 'n@school.test', section: null }, { id: 's5', email: 'a@school.test', section: 'A' }], error: null });
+    await notifyClassPost({ ...POST, section: '' });
+    expect(mockSb.supabase.rpc.mock.calls[0][1].p_event.student_ids).toEqual(['s4']);
   });
 
   test('drafts and empty classes never notify', async () => {
