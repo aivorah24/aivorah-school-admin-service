@@ -6,6 +6,9 @@ const cloudinary = require('cloudinary').v2;
 const router = express.Router();
 const supabase = require('../services/supabase');
 const { requireAdminScope, canManageAnnouncement } = require('../services/adminScope');
+const {
+  notifyAnnouncement, clearAnnouncementNotifications, sweepDueAnnouncements, isLiveForReaders,
+} = require('../services/announcementNotifications');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -80,18 +83,6 @@ async function loadManageable(scope, announcementId) {
 
 const SEVERITY_RANK = { critical: 0, warning: 1, info: 2 };
 const VALID_STATUSES = ['draft', 'scheduled', 'published', 'archived'];
-
-function withinWindow(a, now) {
-  if (a.starts_at && new Date(a.starts_at) > now) return false;
-  if (a.expires_at && new Date(a.expires_at) <= now) return false;
-  return true;
-}
-
-function isLiveForReaders(a, now) {
-  if (a.status === 'published') return withinWindow(a, now);
-  if (a.status === 'scheduled') return !!a.starts_at && withinWindow(a, now);
-  return false;
-}
 
 async function fetchTargetsMap(announcementIds) {
   if (!announcementIds.length) return new Map();
@@ -246,6 +237,8 @@ async function serializeList(announcements, targetsMap, userCtx) {
 router.get('/active', async (req, res) => {
   const userEmail = req.query.userEmail;
   const surface = req.query.surface === 'inbox' ? 'inbox' : 'banner';
+  // Readers poll this, so it also catches scheduled announcements going live (throttled).
+  void sweepDueAnnouncements();
   try {
     const userCtx = userEmail ? await getUserContext(userEmail) : null;
     const taughtByTeacherIds = await getTaughtByTeacherIds(userCtx);
@@ -404,6 +397,7 @@ router.post('/admin', requireAdminScope, async (req, res) => {
 
     await replaceTargets(a.id, scopeTargets(req.adminScope, targets));
     if (Array.isArray(attachments) && attachments.length) await replaceAttachments(a.id, attachments);
+    await notifyAnnouncement(a.id);
 
     res.status(201).json(await serializeOne(a.id));
   } catch (err) {
@@ -516,6 +510,8 @@ router.patch('/admin/:id', requireAdminScope, async (req, res) => {
 
     if (targets !== undefined) await replaceTargets(req.params.id, scopeTargets(req.adminScope, targets));
     if (attachments !== undefined) await replaceAttachments(req.params.id, attachments);
+    if (patch.status === 'draft' || patch.status === 'archived') await clearAnnouncementNotifications(req.params.id);
+    else await notifyAnnouncement(req.params.id);
 
     res.json(await serializeOne(req.params.id));
   } catch (err) {
@@ -534,6 +530,7 @@ router.post('/admin/:id/publish', requireAdminScope, async (req, res) => {
       .update({ status: 'published', updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select('id').single();
     if (error) throw error;
+    await notifyAnnouncement(req.params.id);
     res.json(await serializeOne(req.params.id));
   } catch (err) {
     console.error('[POST /announcements/admin/:id/publish] error:', err.message);
@@ -551,6 +548,7 @@ router.post('/admin/:id/archive', requireAdminScope, async (req, res) => {
       .update({ status: 'archived', updated_at: new Date().toISOString() })
       .eq('id', req.params.id).select('id').single();
     if (error) throw error;
+    await clearAnnouncementNotifications(req.params.id);
     res.json(await serializeOne(req.params.id));
   } catch (err) {
     console.error('[POST /announcements/admin/:id/archive] error:', err.message);

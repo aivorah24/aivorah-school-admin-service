@@ -53,6 +53,9 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Aivorah School Admin service running on http://localhost:${PORT}`);
   });
+  // Scheduled announcements reach the bell when their start time arrives.
+  const { sweepDueAnnouncements } = require('./services/announcementNotifications');
+  setInterval(() => { void sweepDueAnnouncements({ force: true }); }, 60 * 1000).unref();
 }
 
 module.exports = app;
