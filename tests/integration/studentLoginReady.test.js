@@ -1,9 +1,9 @@
 const { makeSupabaseMock } = require('../helpers/supabaseMock');
 const mockSb = makeSupabaseMock();
 jest.mock('../../services/supabase', () => mockSb.supabase);
-jest.mock('../../services/studentAccounts', () => ({
-  ...jest.requireActual('../../services/studentAccounts'),
-  createFirebaseAccount: jest.fn(() => Promise.resolve('firebase-uid-1')),
+jest.mock('../../services/firebaseAuth', () => ({
+  signUp: jest.fn(() => Promise.resolve({ uid: 'firebase-uid-1', idToken: 'id-token-1' })),
+  deleteAccount: jest.fn(() => Promise.resolve()),
 }));
 jest.mock('../../services/mailer', () => ({
   sendCredentialsEmail: jest.fn(() => Promise.resolve()),
