@@ -11,48 +11,7 @@ const cloudinary = require('cloudinary').v2;
 const router = express.Router();
 const supabase = require('../services/supabase');
 const { requireHomeroomTeacher, getUserContext, canViewClass } = require('../services/classAccess');
-
-async function notifyParentsOfPost(post) {
-  try {
-    // 1. Fetch all students in this grade/section/school
-    const { data: students } = await supabase
-      .from('users')
-      .select('id, name')
-      .eq('school', post.school_id)
-      .eq('grade', post.grade)
-      .eq('section', post.section || '');
-    if (!students || students.length === 0) return;
-
-    const studentIds = students.map(s => s.id);
-
-    // 2. Fetch all parent relationships
-    const { data: parents } = await supabase
-      .from('parent_children')
-      .select('parent_email, child_id')
-      .in('child_id', studentIds);
-    if (!parents || parents.length === 0) return;
-
-    // 3. Insert system messages for parents
-    const childNameMap = new Map(students.map(s => [s.id, s.name]));
-    for (const { parent_email, child_id } of parents) {
-      const childName = childNameMap.get(child_id) || 'your child';
-      const text = `New Class Portfolio post published for ${childName}!`;
-      // Message format: PORTFOLIO_CARD|postId|text|grade|section
-      const content = `PORTFOLIO_CARD|${post.id}|${text}|${post.grade}|${post.section || ''}`;
-      
-      await supabase.from('messages').insert({
-        sender_email:    'system@aivorah.com',
-        sender_name:     'Aivorah',
-        sender_role:     'teacher',
-        recipient_email: parent_email,
-        recipient_name:  parent_email,
-        content:         content,
-      });
-    }
-  } catch (err) {
-    console.error('[notifyParentsOfPost] error:', err.message);
-  }
-}
+const { notifyClassPost, clearClassPostNotifications } = require('../services/classPostNotifications');
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -244,9 +203,8 @@ router.post('/posts', async (req, res) => {
       if (tagErr) throw tagErr;
     }
 
-    if (post.status === 'published') {
-      notifyParentsOfPost(post);
-    }
+    // Awaited (never throws) so the bell row exists before the teacher's feed refreshes.
+    if (post.status === 'published') await notifyClassPost(post);
 
     const [serialized] = await serializePosts([post], null);
     res.status(201).json(serialized);
@@ -268,7 +226,7 @@ router.post('/posts/:id/publish', async (req, res) => {
       .update({ status: 'published', updated_at: new Date().toISOString() }).eq('id', post.id);
     if (error) throw error;
 
-    notifyParentsOfPost({ ...post, status: 'published' });
+    await notifyClassPost({ ...post, status: 'published' });
 
     res.json({ ok: true });
   } catch (err) {
@@ -288,6 +246,7 @@ router.delete('/posts/:id', async (req, res) => {
 
     const { error } = await supabase.from('class_portfolio_posts').delete().eq('id', post.id);
     if (error) throw error;
+    await clearClassPostNotifications(post.id);
     res.json({ ok: true });
   } catch (err) {
     console.error('[DELETE /class-portfolio/posts/:id] error:', err.message);
