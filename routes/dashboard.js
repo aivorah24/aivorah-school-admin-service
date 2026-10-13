@@ -9,6 +9,7 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../services/supabase');
 const { sendB2BConversionWelcomeEmail } = require('../services/mailer');
+const { normalizeCurriculum } = require('../services/curriculum');
 
 function effectiveSchoolId(req) {
   if (req.adminScope.scopeType === 'school') return req.adminScope.schoolId;
@@ -59,7 +60,7 @@ router.get('/overview', async (req, res) => {
 
     res.json({
       school: {
-        id: school.id, name: school.name, curriculum: school.curriculum || null, logoUrl,
+        id: school.id, name: school.name, curriculum: normalizeCurriculum(school.curriculum) || null, logoUrl,
         academicYear: school.academic_year || '', contactEmail: school.contact_email || '',
       },
       counts: {
@@ -165,7 +166,7 @@ router.get('/access-requests', async (req, res) => {
         parentConsentStatus,
         userCreatedAt: u?.created_at || null,
         studentGrade: u?.grade || null,
-        curriculum: u?.curriculum || null,
+        curriculum: normalizeCurriculum(u?.curriculum) || null,
         parents,
       };
     }));

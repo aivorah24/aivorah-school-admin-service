@@ -14,6 +14,7 @@ const express = require('express');
 const router = express.Router();
 const supabase = require('../services/supabase');
 const { getUserContext } = require('../services/classAccess');
+const { normalizeCurriculum, curriculumAliases } = require('../services/curriculum');
 
 const MANAGER_ROLES = ['teacher', 'school_admin', 'super_admin'];
 
@@ -24,7 +25,7 @@ async function visibleScopes(userCtx) {
   if (MANAGER_ROLES.includes(userCtx.role)) return null; // all
   const scopes = new Set(['school']);
   if (userCtx.grade) scopes.add(userCtx.grade);
-  if (userCtx.curriculum) scopes.add(userCtx.curriculum);
+  if (userCtx.curriculum) curriculumAliases(userCtx.curriculum).forEach((c) => scopes.add(c));
   if (userCtx.role === 'parent') {
     const { data: kids } = await supabase
       .from('parent_children')
@@ -32,7 +33,7 @@ async function visibleScopes(userCtx) {
       .eq('parent_email', userCtx.email);
     for (const k of kids || []) {
       if (k.users?.grade) scopes.add(k.users.grade);
-      if (k.users?.curriculum) scopes.add(k.users.curriculum);
+      if (k.users?.curriculum) curriculumAliases(k.users.curriculum).forEach((c) => scopes.add(c));
     }
   }
   return [...scopes];
@@ -103,7 +104,7 @@ router.get('/', async (req, res) => {
 
     res.json({
       canManage,
-      scopeLabel: userCtx.curriculum || null,
+      scopeLabel: normalizeCurriculum(userCtx.curriculum) || null,
       breadcrumb: await breadcrumb(schoolId, folderId),
       folders: visFolders.map((f) => ({
         id: f.id, name: f.name, scope: f.scope,
@@ -139,7 +140,7 @@ router.post('/folder', async (req, res) => {
       school_id: gate.userCtx.school_id,
       parent_folder_id: req.body.parentFolderId || null,
       name: String(name).trim(),
-      scope: req.body.scope ? String(req.body.scope).trim() : 'school',
+      scope: req.body.scope ? normalizeCurriculum(req.body.scope) : 'school',
       created_by: gate.userCtx.email,
     }).select('id').single();
     if (error) throw error;
@@ -164,7 +165,7 @@ router.post('/file', async (req, res) => {
       file_url: fileUrl,
       file_type: req.body.fileType || null,
       file_size: req.body.fileSize || 0,
-      scope: req.body.scope ? String(req.body.scope).trim() : 'school',
+      scope: req.body.scope ? normalizeCurriculum(req.body.scope) : 'school',
       uploaded_by: gate.userCtx.email,
     }).select('id').single();
     if (error) throw error;

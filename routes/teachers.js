@@ -10,6 +10,7 @@ const supabase = require('../services/supabase');
 const { generateSecurePassword, generateStaffEmail, createFirebaseAccount, toTitleCase } = require('../services/teacherAccounts');
 const { sendOwnAccountCredentialsEmail } = require('../services/mailer');
 const { deriveStatusMap, displayStatus } = require('../services/userStatus');
+const { normalizeCurriculum, normalizeCurriculumEntries } = require('../services/curriculum');
 
 function effectiveSchoolId(req) {
   if (req.adminScope.scopeType === 'school') return req.adminScope.schoolId;
@@ -21,7 +22,7 @@ function effectiveSchoolId(req) {
 // (Grade 11-12), so the exact curriculum is derived per grade.
 function resolveCurriculum(baseCurriculum, grade) {
   if (!baseCurriculum) return null;
-  if (baseCurriculum !== 'IB') return baseCurriculum;
+  if (baseCurriculum !== 'IB') return normalizeCurriculum(baseCurriculum);
   const num = parseInt(String(grade || '').replace(/\D/g, ''), 10);
   if (!num) return 'IB PYP';
   if (num <= 5) return 'IB PYP';
@@ -56,13 +57,13 @@ function normalizeTeaches(body) {
   if (Array.isArray(teaches) && teaches.length > 0) {
     return teaches
       .map((e) => ({
-        curriculum: String(e?.curriculum || '').trim(),
+        curriculum: normalizeCurriculum(e?.curriculum || ''),
         grade: String(e?.grade || '').trim(),
         subjects: Array.isArray(e?.subjects) ? e.subjects.map((s) => String(s).trim()).filter(Boolean) : [],
       }))
       .filter((e) => e.curriculum && e.grade);
   }
-  const legacyCurriculum = String(curriculum || '').trim();
+  const legacyCurriculum = normalizeCurriculum(curriculum || '');
   const legacyGrade = String(grade || '').trim();
   if (!legacyCurriculum && !legacyGrade) return [];
   return [{
@@ -84,7 +85,7 @@ router.get('/teachers', async (req, res) => {
     const { data: prefs } = emails.length
       ? await supabase.from('user_preferences').select('user_email, data').in('user_email', emails)
       : { data: [] };
-    const teachesMap = new Map((prefs || []).map((p) => [p.user_email, p.data?.teaches || []]));
+    const teachesMap = new Map((prefs || []).map((p) => [p.user_email, normalizeCurriculumEntries(p.data?.teaches || [])]));
 
     res.json((teachers || []).map((t) => {
       const teaches = teachesMap.get(t.email) || [];
@@ -92,7 +93,7 @@ router.get('/teachers', async (req, res) => {
         id: t.id, name: t.name, email: t.email,
         teaches,
         subjects: Array.from(new Set(teaches.flatMap((e) => Array.isArray(e?.subjects) ? e.subjects : []))),
-        grade: t.grade || null, curriculum: t.curriculum || null,
+        grade: t.grade || null, curriculum: normalizeCurriculum(t.curriculum) || null,
         status: displayStatus(t.status, mustChangeMap.get(t.email) ?? true),
         joinedAt: t.created_at,
       };
@@ -172,7 +173,7 @@ function buildTeacherSampleRows(baseCurriculum) {
 
 async function buildTeacherTemplateRows(schoolId) {
   const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
-  const sampleRows = buildTeacherSampleRows(school?.curriculum || null);
+  const sampleRows = buildTeacherSampleRows(normalizeCurriculum(school?.curriculum) || null);
 
   const { data: teachers, error } = await supabase
     .from('users').select('name, email, phone, grade, curriculum').eq('school_id', schoolId).eq('role', 'teacher').order('name');
@@ -185,7 +186,7 @@ async function buildTeacherTemplateRows(schoolId) {
   const realRows = (teachers || []).map((t) => {
     const teaches = teachesMap.get(t.email) || [];
     const subjectsCsv = Array.from(new Set(teaches.flatMap((e) => Array.isArray(e?.subjects) ? e.subjects : []))).join('; ');
-    return [t.name || '', t.email || '', t.curriculum || '', t.grade || '', subjectsCsv, t.phone || ''];
+    return [t.name || '', t.email || '', normalizeCurriculum(t.curriculum) || '', t.grade || '', subjectsCsv, t.phone || ''];
   });
   return [...sampleRows, ...realRows];
 }
@@ -258,7 +259,7 @@ router.get('/teachers/template.xlsx', async (req, res) => {
 function parseRowTeachingEntries(rowCurriculum, rowGrade, rowSubjectsRaw, schoolBaseCurriculumForTeachers) {
   const grades = String(rowGrade || '').split('|').map((s) => s.trim()).filter(Boolean);
   if (grades.length === 0) return { entries: [], error: null };
-  const curricula = String(rowCurriculum || '').split('|').map((s) => s.trim()).filter(Boolean);
+  const curricula = String(rowCurriculum || '').split('|').map((s) => normalizeCurriculum(s)).filter(Boolean);
   const subjectGroups = String(rowSubjectsRaw || '').split('|').map((s) => s.trim());
   if (grades.length > 1) {
     if (subjectGroups.length !== grades.length) {
@@ -286,7 +287,7 @@ router.post('/teachers/bulk', async (req, res) => {
   try {
     const { data: school } = await supabase.from('schools').select('name, curriculum').eq('id', schoolId).maybeSingle();
     const schoolName = school?.name || 'School';
-    const schoolBaseCurriculumForTeachers = school?.curriculum || null;
+    const schoolBaseCurriculumForTeachers = normalizeCurriculum(school?.curriculum) || null;
     const errors = [];
     const teacherByEmail = new Map(); // email -> record, for merging same-email rows within this batch
     const createdRecords = [];

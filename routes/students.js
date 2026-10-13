@@ -16,6 +16,7 @@ const {
 const { sendCredentialsEmail, sendOwnAccountCredentialsEmail } = require('../services/mailer');
 const { sortGradeNames, sortCurriculumNames, buildGradesSectionsView } = require('../services/academicStructure');
 const { deriveStatusMap, displayStatus } = require('../services/userStatus');
+const { normalizeCurriculum, curriculumAliases } = require('../services/curriculum');
 
 function effectiveSchoolId(req) {
   if (req.adminScope.scopeType === 'school') return req.adminScope.schoolId;
@@ -28,7 +29,7 @@ function effectiveSchoolId(req) {
 // exact curriculum must be derived per-student from their own grade.
 function resolveCurriculum(baseCurriculum, grade) {
   if (!baseCurriculum) return null;
-  if (baseCurriculum !== 'IB') return baseCurriculum;
+  if (baseCurriculum !== 'IB') return normalizeCurriculum(baseCurriculum);
   const num = parseInt(String(grade || '').replace(/\D/g, ''), 10);
   if (!num) return 'IB PYP';
   if (num <= 5) return 'IB PYP';
@@ -59,7 +60,7 @@ router.get('/students', async (req, res) => {
     if (search) query = query.or(`name.ilike.%${search}%,admission_number.ilike.%${search}%`);
     if (req.query.grade && req.query.grade !== 'all') query = query.eq('grade', req.query.grade);
     if (req.query.section && req.query.section !== 'all') query = query.eq('section', req.query.section);
-    if (req.query.curriculum && req.query.curriculum !== 'all') query = query.eq('curriculum', req.query.curriculum);
+    if (req.query.curriculum && req.query.curriculum !== 'all') query = query.in('curriculum', curriculumAliases(req.query.curriculum));
 
     const { data, error } = await query;
     if (error) throw error;
@@ -73,7 +74,7 @@ router.get('/students', async (req, res) => {
       admissionNumber: r.admission_number,
       grade: r.grade,
       section: r.section,
-      curriculum: r.curriculum,
+      curriculum: normalizeCurriculum(r.curriculum),
       status: displayStatus(r.status, mustChangeMap.get(r.email) ?? true),
       joinedAt: r.created_at,
       lastActiveAt: r.last_active_at,
@@ -130,11 +131,11 @@ router.get('/students/facets', async (req, res) => {
       if (g) gradeSet.add(g);
       const s = String(r.section || '').trim();
       if (s) sectionSet.add(s);
-      const c = String(r.curriculum || '').trim();
+      const c = normalizeCurriculum(r.curriculum || '');
       if (c) curriculumSet.add(c);
     }
 
-    const baseCurriculum = school?.curriculum || null;
+    const baseCurriculum = normalizeCurriculum(school?.curriculum) || null;
     let curriculums;
     if (baseCurriculum === 'IB') {
       curriculums = ['IB PYP', 'IB MYP', 'IB DP'];
@@ -185,7 +186,7 @@ function toCsv(header, rows) {
 
 async function buildTemplateRows(schoolId) {
   const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
-  return buildSampleRows(school?.curriculum || null);
+  return buildSampleRows(normalizeCurriculum(school?.curriculum) || null);
 }
 
 router.get('/students/template.csv', async (req, res) => {
@@ -313,7 +314,7 @@ router.post('/students', async (req, res) => {
     const { data: school, error: schoolErr } = await supabase.from('schools').select('name, curriculum').eq('id', schoolId).maybeSingle();
     if (schoolErr) throw schoolErr;
     const schoolName = school?.name || 'School';
-    const schoolCurriculum = String(curriculumIn || '').trim() || resolveCurriculum(school?.curriculum, grade);
+    const schoolCurriculum = normalizeCurriculum(curriculumIn || '') || resolveCurriculum(school?.curriculum, grade);
     const name = toTitleCase(`${firstName.trim()} ${lastName.trim()}`);
     const studentEmailProvided = String(emailOverride || '').trim().toLowerCase();
     const email = studentEmailProvided || generateStudentEmail(name, schoolName);
@@ -462,7 +463,7 @@ router.patch('/students/:id', async (req, res) => {
     }
     if (grade !== undefined) patch.grade = String(grade).trim() || null;
     if (section !== undefined) patch.section = String(section).trim() || null;
-    if (curriculum !== undefined) patch.curriculum = String(curriculum).trim() || null;
+    if (curriculum !== undefined) patch.curriculum = normalizeCurriculum(curriculum || '') || null;
     else if (patch.grade) {
       const { data: school } = await supabase.from('schools').select('curriculum').eq('id', schoolId).maybeSingle();
       const derived = derivedCurriculum(school?.curriculum, rows[0]?.curriculum, patch.grade);
@@ -638,7 +639,7 @@ router.post('/students/bulk', async (req, res) => {
     const { data: school, error: schoolErr } = await supabase.from('schools').select('name, curriculum').eq('id', schoolId).maybeSingle();
     if (schoolErr) throw schoolErr;
     const schoolName = school?.name || 'School';
-    const schoolBaseCurriculum = school?.curriculum || null;
+    const schoolBaseCurriculum = normalizeCurriculum(school?.curriculum) || null;
 
     const { count: initialCount } = await supabase.from('users')
       .select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('role', 'student');
@@ -679,7 +680,7 @@ router.post('/students/bulk', async (req, res) => {
       const studentName = String(raw.studentName || '').trim();
       const studentEmail = String(raw.studentEmail || '').trim().toLowerCase();
       const admissionNo = String(raw.admissionNo || '').trim();
-      const rowCurriculum = String(raw.curriculum || '').trim();
+      const rowCurriculum = normalizeCurriculum(raw.curriculum || '');
       const grade = String(raw.grade || '').trim();
       const section = String(raw.section || '').trim();
       const parentName = String(raw.parentName || '').trim();
