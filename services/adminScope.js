@@ -18,6 +18,7 @@
  *     configuration error, never "all schools".
  *   - anyone else → REJECTED (403).
  */
+const { verifyIdToken } = require('./firebaseToken');
 const supabase = require('./supabase');
 
 function getAllowedAdminEmails() {
@@ -110,19 +111,40 @@ async function canManageAnnouncement(scope, announcement, targets) {
  * Express middleware wrapper: reads adminEmail from body or query, resolves
  * scope, attaches req.adminScope (and legacy req.adminEmail), or rejects.
  */
-function requireAdminScope(req, res, next) {
-  const email = req.body?.adminEmail || req.query.adminEmail;
-  resolveAdminScope(email)
-    .then((result) => {
-      if (!result.ok) return res.status(result.statusCode).json({ error: result.error });
-      req.adminScope = result.scope;
-      req.adminEmail = result.scope.email;
-      next();
-    })
-    .catch((err) => {
-      console.error('[adminScope] resolution failed:', err.message);
-      res.status(500).json({ error: 'Authorization check failed' });
-    });
+// AUTH_ENFORCE=enforce: the admin identity must come from a valid sign-in token.
+// Otherwise (monitor) mismatches/missing tokens are only logged and the old adminEmail path is used.
+async function tokenEmail(req) {
+  const match = /^Bearer (.+)$/.exec(req.headers?.authorization || '');
+  if (!match) return { problem: 'missing token' };
+  try {
+    const decoded = await verifyIdToken(match[1]);
+    return { email: String(decoded.email || '').toLowerCase().trim() };
+  } catch (e) {
+    return { problem: `invalid token (${e.message})` };
+  }
+}
+
+async function requireAdminScope(req, res, next) {
+  const claimed = String(req.body?.adminEmail || req.query.adminEmail || '').toLowerCase().trim();
+  const enforce = process.env.AUTH_ENFORCE === 'enforce';
+  const { email: signedIn, problem } = await tokenEmail(req);
+  const mismatch = signedIn && claimed && signedIn !== claimed;
+  if (problem || mismatch) {
+    const why = problem || `adminEmail ${claimed} != signed-in ${signedIn}`;
+    if (enforce) return res.status(problem ? 401 : 403).json({ error: problem ? 'Sign in required' : 'Not authorized to manage this school' });
+    console.warn(`[auth-monitor] would block ${req.method} ${req.originalUrl}: ${why}`);
+  }
+  const email = enforce ? signedIn : (claimed || signedIn);
+  try {
+    const result = await resolveAdminScope(email);
+    if (!result.ok) return res.status(result.statusCode).json({ error: result.error });
+    req.adminScope = result.scope;
+    req.adminEmail = result.scope.email;
+    next();
+  } catch (err) {
+    console.error('[adminScope] resolution failed:', err.message);
+    res.status(500).json({ error: 'Authorization check failed' });
+  }
 }
 
 module.exports = { resolveAdminScope, requireAdminScope, canManageAnnouncement, getAllowedAdminEmails };
