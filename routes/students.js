@@ -9,6 +9,7 @@ const express = require('express');
 const router = express.Router();
 const { randomUUID } = require('crypto');
 const supabase = require('../services/supabase');
+const { notifyPromoted } = require('../services/promotionNotify');
 const {
   generateSecurePassword, generateStudentEmail, toTitleCase, generateAdmissionNumber,
 } = require('../services/studentAccounts');
@@ -442,7 +443,7 @@ router.post('/students', async (req, res) => {
 });
 
 async function assertOwnedStudents(ids, schoolId) {
-  const { data, error } = await supabase.from('users').select('id, curriculum').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
+  const { data, error } = await supabase.from('users').select('id, curriculum, grade, section').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
   if (error) throw error;
   const rows = data || [];
   const owned = new Set(rows.map((r) => r.id));
@@ -626,6 +627,7 @@ router.post('/students/bulk-grade', async (req, res) => {
         const { error } = await supabase.from('users').update(c ? { ...base, curriculum: c } : base).in('id', ids);
         if (error) throw error;
       }
+      await notifyPromoted(rows, { grade: targetGrade, section: base.section }, { actorEmail: req.adminScope.email, actorRole: 'school_admin' });
     }
     res.json({ promoted: owned.length, skipped, grade: targetGrade, section: section !== undefined ? (String(section || '').trim() || null) : undefined });
   } catch (err) {
