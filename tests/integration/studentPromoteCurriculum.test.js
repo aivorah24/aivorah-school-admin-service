@@ -99,3 +99,26 @@ describe('mixed batch promoted together', () => {
     expect(res.body.skipped).toEqual(['other-school']);
   });
 });
+
+describe('bulk-grade notifies promoted students', () => {
+  test('inserts an account_updated bell row per student whose grade changed', async () => {
+    mockSb.setTable('users', [
+      { data: ADMIN, error: null },
+      { data: [{ id: 'st1', curriculum: 'CBSE', grade: 'Grade 8', section: 'B' }], error: null },
+      { data: null, error: null },
+    ]);
+    mockSb.setTable('schools', { data: { curriculum: 'CBSE' }, error: null });
+    mockSb.setTable('notifications', { data: null, error: null });
+
+    const res = await request(app).post('/school-admin/students/bulk-grade?adminEmail=admin@school.test').send({ studentIds: ['st1'], grade: 'Grade 9' });
+    expect(res.status).toBe(200);
+
+    const idx = mockSb.supabase.from.mock.calls.findIndex((c) => c[0] === 'notifications');
+    const rows = mockSb.supabase.from.mock.results[idx].value.insert.mock.calls[0][0];
+    expect(rows).toEqual([expect.objectContaining({
+      recipient_id: 'st1', recipient_role: 'student', type: 'account_updated', entity_id: 'st1',
+      title: "You've been promoted to Grade 9", body: 'Moved from Grade 8 - B to Grade 9 - B.',
+      actor_role: 'school_admin',
+    })]);
+  });
+});
