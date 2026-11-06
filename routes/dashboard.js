@@ -10,6 +10,7 @@ const router = express.Router();
 const supabase = require('../services/supabase');
 const { sendB2BConversionWelcomeEmail } = require('../services/mailer');
 const { normalizeCurriculum } = require('../services/curriculum');
+const { clearOldSchoolLinks } = require('../services/studentTransfer');
 
 function effectiveSchoolId(req) {
   if (req.adminScope.scopeType === 'school') return req.adminScope.schoolId;
@@ -194,7 +195,7 @@ router.post('/access-requests/:id/approve', async (req, res) => {
     // Look up school name and user record for cascade & notification
     const [{ data: schoolRow }, { data: userRow }] = await Promise.all([
       supabase.from('schools').select('name').eq('id', schoolId).maybeSingle(),
-      supabase.from('users').select('id, name, role').eq('email', reqRow.user_email).maybeSingle(),
+      supabase.from('users').select('id, name, role, status, school_id').eq('email', reqRow.user_email).maybeSingle(),
     ]);
     const schoolName = schoolRow?.name || 'Your School';
 
@@ -202,8 +203,14 @@ router.post('/access-requests/:id/approve', async (req, res) => {
     const patch = { school_id: schoolId, school: schoolName };
     if (reqRow.grade) patch.grade = reqRow.grade;
     if (reqRow.section) patch.section = reqRow.section;
+    // A student archived by their previous school becomes active here, without
+    // the old school's class-teacher links.
+    if (userRow?.status === 'archived') patch.status = 'active';
     const { error: uErr } = await supabase.from('users').update(patch).eq('email', reqRow.user_email);
     if (uErr) throw uErr;
+    if (userRow?.role === 'student' && userRow.id && userRow.school_id && userRow.school_id !== schoolId) {
+      await clearOldSchoolLinks(userRow.id);
+    }
 
     // Also update preferences data with school details
     const { data: prefRow } = await supabase.from('user_preferences').select('data').eq('user_email', reqRow.user_email).maybeSingle();
