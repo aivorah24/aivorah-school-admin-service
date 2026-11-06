@@ -15,6 +15,7 @@ const {
 } = require('../services/studentAccounts');
 const { generateParentLoginId } = require('../services/parentAccounts');
 const { provisionAccount } = require('../services/accountProvisioning');
+const { transferVerdict, moveStudentToSchool, closeApprovedRequests } = require('../services/studentTransfer');
 const { sendCredentialsEmail, sendOwnAccountCredentialsEmail } = require('../services/mailer');
 const { sortGradeNames, sortCurriculumNames, buildGradesSectionsView } = require('../services/academicStructure');
 const { deriveStatusMap, displayStatus } = require('../services/userStatus');
@@ -339,30 +340,64 @@ router.post('/students', async (req, res) => {
     const { count } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('school_id', schoolId).eq('role', 'student');
     const admissionNumber = admissionNumberTrimmed || generateAdmissionNumber(schoolName, count || 0);
 
-    const userId = randomUUID();
-    const studentAccount = await provisionAccount({
-      email: studentEmailProvided,
-      generate: ({ attempt }) => generateStudentEmail(name, schoolName, attempt),
-      password,
-      conflictMessage: 'This email is already registered.',
-      insertUser: async (loginEmail) => {
-        const { error: userErr } = await supabase.from('users').insert({
-          id: userId, name, email: loginEmail, role: 'student',
-          grade, section: section || null, school: schoolName, school_id: schoolId, curriculum: schoolCurriculum,
-          admission_number: admissionNumber, status: 'active', onboarding_complete: true,
-          admin_notes: notes?.trim() || null,
-        });
-        if (userErr) throw userErr;
-      },
-    });
-    const { email, firebaseUid } = studentAccount;
+    // An email that already has an account: a student archived by another
+    // school moves here (services/studentTransfer.js); anything else is refused.
+    let transferred = null;
+    if (studentEmailProvided) {
+      const { data: existingUser } = await supabase.from('users')
+        .select('id, name, email, role, status, school_id').eq('email', studentEmailProvided).maybeSingle();
+      const verdict = existingUser ? transferVerdict(existingUser, schoolId) : null;
+      if (verdict === 'archived_here') {
+        return res.status(409).json({ error: 'This student is already in your school but archived. Restore them from the Archived list instead.', code: 'ARCHIVED_HERE' });
+      }
+      if (verdict === 'active_elsewhere') {
+        return res.status(409).json({ error: 'This student is still active at another school. Ask that school to archive them first, then add them again.', code: 'ACTIVE_ELSEWHERE' });
+      }
+      if (verdict === 'taken') {
+        return res.status(409).json({ error: 'This email is already registered.', code: 'EMAIL_EXISTS' });
+      }
+      if (verdict === 'transfer') transferred = existingUser;
+    }
 
-    await supabase.from('student_stats').insert({ student_id: userId });
-    const mustChangePassword = initialStatus !== 'active';
-    await supabase.from('user_preferences').upsert({
-      user_email: email,
-      data: { loginId: email, initialPassword: password, studentName: name, grade, section: section || null, school: schoolName, firebaseUid, mustChangePassword, accountStatus: 'active' },
-    });
+    let userId, email, studentAccount = null, mustChangePassword = false;
+    if (transferred) {
+      // Same account, login and progress; new school, class and admission no.
+      userId = transferred.id;
+      email = transferred.email;
+      await moveStudentToSchool({
+        studentId: userId, email, schoolId, schoolName,
+        fields: {
+          grade, section: section || null, curriculum: schoolCurriculum, admission_number: admissionNumber,
+          ...(notes?.trim() ? { admin_notes: notes.trim() } : {}),
+        },
+      });
+    } else {
+      userId = randomUUID();
+      studentAccount = await provisionAccount({
+        email: studentEmailProvided,
+        generate: ({ attempt }) => generateStudentEmail(name, schoolName, attempt),
+        password,
+        conflictMessage: 'This email is already registered.',
+        insertUser: async (loginEmail) => {
+          const { error: userErr } = await supabase.from('users').insert({
+            id: userId, name, email: loginEmail, role: 'student',
+            grade, section: section || null, school: schoolName, school_id: schoolId, curriculum: schoolCurriculum,
+            admission_number: admissionNumber, status: 'active', onboarding_complete: true,
+            admin_notes: notes?.trim() || null,
+          });
+          if (userErr) throw userErr;
+        },
+      });
+      email = studentAccount.email;
+      const firebaseUid = studentAccount.firebaseUid;
+
+      await supabase.from('student_stats').insert({ student_id: userId });
+      mustChangePassword = initialStatus !== 'active';
+      await supabase.from('user_preferences').upsert({
+        user_email: email,
+        data: { loginId: email, initialPassword: password, studentName: name, grade, section: section || null, school: schoolName, firebaseUid, mustChangePassword, accountStatus: 'active' },
+      });
+    }
 
     let resolvedParentEmail = '';
     let newParentCreds = null;
@@ -397,10 +432,13 @@ router.post('/students', async (req, res) => {
             },
           }));
         } catch (pErr) {
-          // Don't leave a student behind whose Add Student call reported failure.
-          await deleteStudentRows(userId, email);
-          await supabase.from('users').delete().eq('id', userId);
-          await studentAccount.deleteFirebaseAccount();
+          // Don't leave a student behind whose Add Student call reported failure
+          // (a moved student keeps their account: it existed before this call).
+          if (!transferred) {
+            await deleteStudentRows(userId, email);
+            await supabase.from('users').delete().eq('id', userId);
+            await studentAccount.deleteFirebaseAccount();
+          }
           throw pErr;
         }
         await supabase.from('user_preferences').upsert({
@@ -421,7 +459,9 @@ router.post('/students', async (req, res) => {
       }
     }
 
-    if (studentEmailProvided) {
+    if (transferred) {
+      // No new password: the student keeps signing in as before.
+    } else if (studentEmailProvided) {
       await sendCredentialsEmail({ to: email, childName: name, loginId: email, password, childEmail: email });
     } else if (resolvedParentEmail) {
       await sendCredentialsEmail({ to: resolvedParentEmail, childName: name, loginId: email, password, childEmail: email });
@@ -430,6 +470,13 @@ router.post('/students', async (req, res) => {
       await sendOwnAccountCredentialsEmail({ to: newParentCreds.email, name: newParentCreds.name, loginId: newParentCreds.email, password: newParentCreds.password, role: 'parent' });
     }
 
+    if (transferred) {
+      return res.status(200).json({
+        id: userId, name: transferred.name || name, email, transferred: true, admissionNumber, grade, section: section || null,
+        status: 'active',
+        parent: newParentCreds ? { name: newParentCreds.name, email: newParentCreds.email, password: newParentCreds.password } : undefined,
+      });
+    }
     res.status(201).json({
       id: userId, name, email, password, admissionNumber, grade, section: section || null,
       status: mustChangePassword ? 'invited' : 'active',
@@ -443,7 +490,7 @@ router.post('/students', async (req, res) => {
 });
 
 async function assertOwnedStudents(ids, schoolId) {
-  const { data, error } = await supabase.from('users').select('id, curriculum, grade, section').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
+  const { data, error } = await supabase.from('users').select('id, email, curriculum, grade, section').in('id', ids).eq('school_id', schoolId).eq('role', 'student');
   if (error) throw error;
   const rows = data || [];
   const owned = new Set(rows.map((r) => r.id));
@@ -456,10 +503,12 @@ router.patch('/students/:id/status', async (req, res) => {
   const { status } = req.body || {};
   if (!['active', 'inactive', 'archived'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
   try {
-    const { owned } = await assertOwnedStudents([req.params.id], req.adminScope.schoolId);
+    const { owned, rows } = await assertOwnedStudents([req.params.id], req.adminScope.schoolId);
     if (!owned.length) return res.status(403).json({ error: 'Not authorized to manage this student' });
     const { error } = await supabase.from('users').update({ status }).eq('id', req.params.id);
     if (error) throw error;
+    // Archived = free to join another school (services/studentTransfer.js).
+    if (status === 'archived') await closeApprovedRequests(rows.map((r) => r.email), req.adminScope.schoolId);
     res.json({ ok: true });
   } catch (err) {
     console.error('[PATCH /school-admin/students/:id/status] error:', err.message);
@@ -592,10 +641,11 @@ router.post('/students/bulk-status', async (req, res) => {
   if (!Array.isArray(studentIds) || !studentIds.length) return res.status(400).json({ error: 'studentIds required' });
   if (!['active', 'inactive', 'archived'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
   try {
-    const { owned, skipped } = await assertOwnedStudents(studentIds, req.adminScope.schoolId);
+    const { owned, skipped, rows } = await assertOwnedStudents(studentIds, req.adminScope.schoolId);
     if (owned.length) {
       const { error } = await supabase.from('users').update({ status }).in('id', owned);
       if (error) throw error;
+      if (status === 'archived') await closeApprovedRequests(rows.map((r) => r.email), req.adminScope.schoolId);
     }
     res.json({ updated: owned.length, skipped });
   } catch (err) {
